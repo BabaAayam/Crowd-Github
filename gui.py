@@ -178,10 +178,10 @@ class CrowdAnalysisApp:
 
    
     def show_results(self):
-    
+        """Create a new window to display analysis results."""
         results_window = tk.Toplevel(self.root)
         results_window.title("Analysis Results")
-        results_window.geometry("700x500")
+        results_window.geometry("700x550")
 
         ttk.Label(results_window, text="Crowd Analysis Summary", font=("Arial", 14, "bold")).pack(pady=10)
 
@@ -189,6 +189,13 @@ class CrowdAnalysisApp:
         if not hasattr(self.analyzer, "people_counts") or not self.analyzer.people_counts:
             ttk.Label(results_window, text="No data available. Run analysis first!", foreground="red").pack(pady=20)
             return
+
+        # ✅ Calculate total people detected across all frames
+        total_people_detected = sum(self.analyzer.people_counts)
+
+        # ✅ Display total people detected
+        ttk.Label(results_window, text=f"📊 Total People Detected: {total_people_detected}", 
+                font=("Arial", 12, "bold"), foreground="blue").pack(pady=5)
 
         # ✅ Create a figure with 3 subplots
         fig, axs = plt.subplots(3, 1, figsize=(6, 8))
