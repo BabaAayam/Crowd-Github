@@ -4,11 +4,19 @@ import numpy as np
 import tensorflow as tf
 import requests
 import json
+import zlib
+import os
+import csv
+from threading import Thread
+from datetime import datetime
 
 class CrowdAnalyzer:
-    def __init__(self, model_path="models/ssd_mobilenet.tflite", server_url="http://localhost:5000/receive_data",edge_mode=False):
+    def __init__(self, model_path="models/ssd_mobilenet.tflite", server_url="http://localhost:5000/receive_data", edge_mode=False):
         # Model initialization
-        self.interpreter = tf.lite.Interpreter(model_path=model_path)
+        self.interpreter = tf.lite.Interpreter(
+            model_path=model_path,
+            num_threads=4  # Use all CPU cores on Pi
+        )
         self.interpreter.allocate_tensors()
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
@@ -16,21 +24,30 @@ class CrowdAnalyzer:
         
         # Server configuration
         self.server_url = server_url
+        self.edge_mode = edge_mode
         self.frame_counter = 0
         self.last_send_time = time.time()
+        self.last_send_status = False
         
-        # Data tracking
+        # Data tracking and CSV offline cache
         self.people_counts = []
         self.anomalies_log = []
         self.processing_times = []
+        self.cache_file = "crowd_cache.csv"
+        
+        # Initialize CSV file with headers if not exists
+        if not os.path.exists(self.cache_file):
+            with open(self.cache_file, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["timestamp", "count", "detections"])
 
     def process_frame(self, frame):
         try:
-            # Frame skipping logic (process every 3rd frame)
+            # Frame skipping for Pi optimization
             self.frame_counter += 1
-            if self.frame_counter % 3 != 0:
+            if self.frame_counter % 3 != 0:  # Process every 3rd frame
                 return frame, 0, [], []
-            
+
             start_time = time.time()
 
             # Preprocessing
@@ -47,13 +64,14 @@ class CrowdAnalyzer:
             scores = self.interpreter.get_tensor(self.output_details[2]['index'])[0]
             num_detections = int(self.interpreter.get_tensor(self.output_details[3]['index'])[0])
 
+            # Detection processing
             count = 0
             detections = []
             anomalies = []
             h, w = frame.shape[:2]
 
             for i in range(num_detections):
-                if scores[i] > 0.5 and classes[i] == 0:
+                if scores[i] > 0.5 and classes[i] == 0:  # Class 0 = person
                     ymin, xmin, ymax, xmax = boxes[i]
                     x1, y1 = int(xmin * w), int(ymin * h)
                     x2, y2 = int(xmax * w), int(ymax * h)
@@ -62,9 +80,7 @@ class CrowdAnalyzer:
                     if count > 10:  # Anomaly threshold
                         anomalies.append((x1, y1, x2, y2))
 
-            
-
-            # Store metrics
+            # Metrics logging
             processing_time = round((time.time() - start_time) * 1000, 2)
             self.people_counts.append(count)
             self.anomalies_log.append(len(anomalies))
@@ -72,8 +88,8 @@ class CrowdAnalyzer:
 
             # Conditional HTTP send
             current_time = time.time()
-            if count > 10 or (current_time - self.last_send_time) > 30:  # 30s heartbeat
-                self.send_data_to_server(count, detections)
+            if count > 10 or (current_time - self.last_send_time) > 30:
+                Thread(target=self.send_data_to_server, args=(count, detections)).start()
                 self.last_send_time = current_time
 
             return frame, count, detections, anomalies
@@ -83,84 +99,49 @@ class CrowdAnalyzer:
             return frame, 0, [], []
 
     def send_data_to_server(self, count, detections):
-        """Optimized HTTP POST with frame skipping"""
+        """Send data with CSV fallback"""
         try:
             payload = {
                 "count": count,
                 "detections": detections,
-                "timestamp": time.time()
+                "timestamp": datetime.now().isoformat()
             }
+            
+            # Compress payload
+            compressed = zlib.compress(json.dumps(payload).encode())
+            
+            # HTTP POST
             response = requests.post(
                 self.server_url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=2  # 2-second timeout
+                data=compressed,
+                headers={
+                    "Content-Type": "application/json",
+                    "Content-Encoding": "gzip"
+                },
+                timeout=2
             )
-            if response.status_code != 200:
-                print(f"[WARNING] Server response: {response.status_code}")
+            self.last_send_status = response.status_code == 200
+            
+            if not self.last_send_status:
+                self.cache_to_csv(count, detections)  # Fallback to CSV
+                
         except Exception as e:
-            print(f"[ERROR] HTTP send failed: {str(e)}")
+            print(f"[ERROR] HTTP send failed: {e}")
+            self.cache_to_csv(count, detections)
 
-# import cv2
-# import numpy as np
-# import tensorflow.lite as tflite
+    def cache_to_csv(self, count, detections):
+        """Append data to CSV file (Pi-friendly)"""
+        try:
+            with open(self.cache_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    datetime.now().isoformat(),
+                    count,
+                    json.dumps(detections)  # Store as JSON string
+                ])
+        except Exception as e:
+            print(f"[WARNING] CSV write failed: {e}")
 
-# # Load the TFLite model
-# interpreter = tflite.Interpreter(model_path="models/ssd_mobilenet.tflite")
-# interpreter.allocate_tensors()
-
-# # Get model details
-# input_details = interpreter.get_input_details()
-# output_details = interpreter.get_output_details()
-
-# height = input_details[0]['shape'][1]
-# width = input_details[0]['shape'][2]
-
-# # Open webcam
-# cap = cv2.VideoCapture(0)
-
-# while cap.isOpened():
-#     ret, frame = cap.read()
-#     if not ret:
-#         break
-
-#     # Preprocess the image
-#     resized_frame = cv2.resize(frame, (width, height))
-#     input_data = np.expand_dims(resized_frame, axis=0)
-
-#     # Run inference
-#     interpreter.set_tensor(input_details[0]['index'], input_data)
-#     interpreter.invoke()
-
-#     # Extract results
-#     boxes = interpreter.get_tensor(output_details[0]['index'])[0]  # Bounding boxes
-#     classes = interpreter.get_tensor(output_details[1]['index'])[0]  # Class IDs
-#     scores = interpreter.get_tensor(output_details[2]['index'])[0]  # Confidence Scores
-
-#     # Draw detections
-#     for i in range(len(scores)):
-#      if scores[i] > 0.5:  # Confidence threshold
-#         y_min, x_min, y_max, x_max = boxes[i]  # Normalized coordinates
-
-#         # Convert to pixel values
-#         x_min = int(x_min * frame.shape[1])
-#         y_min = int(y_min * frame.shape[0])
-#         x_max = int(x_max * frame.shape[1])
-#         y_max = int(y_max * frame.shape[0])
-
-#         # Draw bounding box
-#         cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
-
-#         # Display label (assuming class ID 0 = "Person")
-#         label = "Person" if int(classes[i]) == 0 else "Unknown"
-#         cv2.putText(frame, label, (x_min, y_min - 10),
-#                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-
-#     # Show output
-#     cv2.imshow("Crowd Analysis", frame)
-#     if cv2.waitKey(1) & 0xFF == ord('q'):
-#         break
-
-# cap.release()
-# cv2.destroyAllWindows()
+    def __del__(self):
+        """Ensure all data is flushed to CSV on exit"""
+        pass  # CSV writes are immediate
