@@ -7,11 +7,15 @@ import json
 import zlib
 import os
 import csv
+import base64
 from threading import Thread
 from datetime import datetime
 
 class CrowdAnalyzer:
-    def __init__(self, model_path="models/ssd_mobilenet.tflite", server_url="http://localhost:5000/receive_data", edge_mode=False):
+    def __init__(self, model_path="models/ssd_mobilenet.tflite", 
+                 server_url="http://localhost:5000/receive_data", 
+                 edge_mode=False,
+                 advanced_analytics_interval=3):
         # Model initialization
         self.interpreter = tf.lite.Interpreter(
             model_path=model_path,
@@ -28,6 +32,7 @@ class CrowdAnalyzer:
         self.frame_counter = 0
         self.last_send_time = time.time()
         self.last_send_status = False
+        self.advanced_analytics_interval = advanced_analytics_interval
         
         # Data tracking and CSV offline cache
         self.people_counts = []
@@ -39,7 +44,7 @@ class CrowdAnalyzer:
         if not os.path.exists(self.cache_file):
             with open(self.cache_file, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(["timestamp", "count", "detections"])
+                writer.writerow(["timestamp", "count", "detections", "frame_data"])
 
     def process_frame(self, frame):
         try:
@@ -86,10 +91,25 @@ class CrowdAnalyzer:
             self.anomalies_log.append(len(anomalies))
             self.processing_times.append(processing_time)
 
+            # Prepare payload for server
+            payload = {
+                "count": count,
+                "detections": detections,
+                "timestamp": datetime.now().isoformat(),
+                "processing_time_ms": processing_time
+            }
+
+            # Add full frame for advanced analytics at specified interval
+            if self.frame_counter % self.advanced_analytics_interval == 0:
+                # Compress frame to JPEG (quality 70 to reduce size)
+                _, jpeg_frame = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                payload["full_frame"] = base64.b64encode(jpeg_frame).decode('ascii')
+                payload["frame_id"] = self.frame_counter
+
             # Conditional HTTP send
             current_time = time.time()
             if count > 10 or (current_time - self.last_send_time) > 30:
-                Thread(target=self.send_data_to_server, args=(count, detections)).start()
+                Thread(target=self.send_data_to_server, args=(payload,)).start()
                 self.last_send_time = current_time
 
             return frame, count, detections, anomalies
@@ -98,46 +118,46 @@ class CrowdAnalyzer:
             print(f"[ERROR] Frame processing failed: {e}")
             return frame, 0, [], []
 
-    def send_data_to_server(self, count, detections):
-        """Send data with CSV fallback"""
+    def send_data_to_server(self, payload):
+        """Send data with CSV fallback (modified for advanced analytics)"""
         try:
-            payload = {
-                "count": count,
-                "detections": detections,
-                "timestamp": datetime.now().isoformat()
-            }
-            
             # Compress payload
             compressed = zlib.compress(json.dumps(payload).encode())
+            
+            # Determine content type
+            headers = {
+                "Content-Type": "application/json",
+                "Content-Encoding": "gzip",
+                "X-Data-Type": "advanced" if "full_frame" in payload else "basic"
+            }
             
             # HTTP POST
             response = requests.post(
                 self.server_url,
                 data=compressed,
-                headers={
-                    "Content-Type": "application/json",
-                    "Content-Encoding": "gzip"
-                },
+                headers=headers,
                 timeout=2
             )
             self.last_send_status = response.status_code == 200
             
             if not self.last_send_status:
-                self.cache_to_csv(count, detections)  # Fallback to CSV
+                self.cache_to_csv(payload)  # Fallback to CSV
                 
         except Exception as e:
             print(f"[ERROR] HTTP send failed: {e}")
-            self.cache_to_csv(count, detections)
+            self.cache_to_csv(payload)
 
-    def cache_to_csv(self, count, detections):
-        """Append data to CSV file (Pi-friendly)"""
+    def cache_to_csv(self, payload):
+        """Append data to CSV file (modified for frame data)"""
         try:
             with open(self.cache_file, 'a', newline='') as f:
                 writer = csv.writer(f)
+                frame_data = payload.get("full_frame", "null")
                 writer.writerow([
-                    datetime.now().isoformat(),
-                    count,
-                    json.dumps(detections)  # Store as JSON string
+                    payload["timestamp"],
+                    payload["count"],
+                    json.dumps(payload["detections"]),
+                    frame_data[:30] + "..." if isinstance(frame_data, str) else "null"
                 ])
         except Exception as e:
             print(f"[WARNING] CSV write failed: {e}")
