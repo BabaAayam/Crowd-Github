@@ -19,7 +19,7 @@ class CrowdAnalyzer:
         # Model initialization
         self.interpreter = tf.lite.Interpreter(
             model_path=model_path,
-            num_threads=4  # Use all CPU cores on Pi
+            num_threads=2  # Use only 2 cores of the raspberry pi
         )
         self.interpreter.allocate_tensors()
         self.input_details = self.interpreter.get_input_details()
@@ -50,7 +50,7 @@ class CrowdAnalyzer:
         try:
             # Frame skipping for Pi optimization
             self.frame_counter += 1
-            if self.frame_counter % 3 != 0:  # Process every 3rd frame
+            if self.frame_counter % 5 != 0:  # Process every 3rd frame
                 return frame, 0, [], []
 
             start_time = time.time()
