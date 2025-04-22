@@ -93,12 +93,6 @@ python main.py
 
 ---
 
-## 📸 Screenshots
-
-_(Screenshots coming soon: GUI interface, live crowd detection previews, dashboard analytics.)_
-
----
-
 ## 👥 Contributors
 
 - [Aayam Bajaj](https://github.com/BabaAayam)
